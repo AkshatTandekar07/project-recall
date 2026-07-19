@@ -1,12 +1,13 @@
 """
 src/ingestion.py — ProjectRecall Data Ingestion Layer
 Handles all URL parsing, metadata fetching, thumbnail downloading,
-and transcript extraction.
+transcript extraction, and audio transcription fallback.
 """
 import re
+import time
 import requests
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import yt_dlp
 from youtube_transcript_api import (
@@ -14,8 +15,10 @@ from youtube_transcript_api import (
     TranscriptsDisabled,
     NoTranscriptFound,
 )
+from google import genai
+from google.genai import errors as genai_errors
 
-from .config import THUMBNAIL_DIR, MAX_SHORT_DURATION
+from .config import THUMBNAIL_DIR, AUDIO_DIR, MAX_SHORT_DURATION, GEMINI_API_KEY, GEMINI_LLM_MODEL
 
 # ---------------------------------------------------------------------------
 # URL Patterns (ordered by specificity)
@@ -126,14 +129,158 @@ def download_thumbnail(video_id: str, thumbnail_url: str) -> Optional[str]:
     return None  # Thumbnail is optional; never blocks the save flow
 
 
-def fetch_transcript(video_id: str) -> Optional[str]:
+# ---------------------------------------------------------------------------
+# Audio download (fallback for missing captions)
+# ---------------------------------------------------------------------------
+def download_audio(video_id: str) -> Optional[str]:
     """
-    Fetch and combine the video transcript into a single text block.
+    Download audio-only from a YouTube video using yt-dlp.
+
+    Saves to recall_db/audio/{video_id}.m4a
+    Returns the file path string, or None if download fails.
     """
+    output_path = AUDIO_DIR / f"{video_id}.%(ext)s"
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "format": "bestaudio[ext=m4a]/bestaudio/best",
+        "outtmpl": str(output_path),
+        "postprocessors": [],  # No conversion needed
+    }
+
     try:
-        transcript = YouTubeTranscriptApi().fetch(video_id)
-        # Combine all timed snippets into one continuous text
-        full_text = " ".join(snippet.text for snippet in transcript)
-        return full_text.strip() if full_text.strip() else None
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(
+                f"https://www.youtube.com/shorts/{video_id}", download=True
+            )
+            ext = info.get("ext", "m4a")
+            final_path = AUDIO_DIR / f"{video_id}.{ext}"
+            if final_path.exists():
+                return str(final_path)
+    except Exception:
+        pass
+
+    # Check if any file was created with the video_id prefix
+    for f in AUDIO_DIR.iterdir():
+        if f.stem == video_id:
+            return str(f)
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Audio transcription via Gemini
+# ---------------------------------------------------------------------------
+def transcribe_audio(audio_path: str) -> Optional[str]:
+    """
+    Transcribe an audio file using Gemini's audio understanding.
+
+    Steps:
+      1. Upload the audio file via the Gemini File API
+      2. Send it to Gemini with a transcription prompt
+      3. Clean up the uploaded file
+      4. Return the plain text transcription
+
+    Returns the transcription text, or None on failure.
+    """
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    uploaded_file = None
+    try:
+        # Upload audio to Gemini File API
+        uploaded_file = client.files.upload(file=audio_path)
+
+        # Wait for file to be processed (it may take a moment)
+        delay = 1
+        for _ in range(10):
+            file_status = client.files.get(name=uploaded_file.name)
+            if file_status.state and file_status.state.name == "ACTIVE":
+                break
+            time.sleep(delay)
+            delay = min(delay * 1.5, 5)
+
+        # Transcribe with retry on transient errors
+        prompt = (
+            "Transcribe this audio verbatim. Output ONLY the spoken words "
+            "as plain text, no timestamps, no speaker labels, no formatting."
+        )
+
+        response = None
+        retry_delay = 2
+        for attempt in range(1, 4):
+            try:
+                response = client.models.generate_content(
+                    model=GEMINI_LLM_MODEL,
+                    contents=[prompt, uploaded_file],
+                )
+                break
+            except genai_errors.ServerError:
+                if attempt < 3:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise
+            except genai_errors.ClientError as exc:
+                if "RESOURCE_EXHAUSTED" in str(exc) and attempt < 3:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise
+
+        if response and response.text:
+            return response.text.strip()
+        return None
+
     except Exception:
         return None
+
+    finally:
+        # Clean up: delete uploaded file from Gemini
+        if uploaded_file:
+            try:
+                client.files.delete(name=uploaded_file.name)
+            except Exception:
+                pass  # Non-fatal
+
+        # Clean up: delete local audio file
+        try:
+            Path(audio_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Transcript fetching (with audio fallback)
+# ---------------------------------------------------------------------------
+def fetch_transcript(video_id: str, use_audio_fallback: bool = True) -> Tuple[Optional[str], str]:
+    """
+    Fetch the video transcript, with automatic audio transcription fallback.
+
+    Tries YouTube captions first (fast, free). If unavailable and
+    use_audio_fallback is True, downloads audio and transcribes via Gemini.
+
+    Returns:
+      (transcript_text, source) where source is "captions" or "audio"
+      If both fail, returns (None, "none")
+    """
+    # Attempt 1: YouTube captions (fast path)
+    try:
+        transcript = YouTubeTranscriptApi().fetch(video_id)
+        full_text = " ".join(snippet.text for snippet in transcript)
+        text = full_text.strip()
+        if text:
+            return (text, "captions")
+    except Exception:
+        pass
+
+    # Attempt 2: Audio transcription fallback
+    if use_audio_fallback:
+        audio_path = download_audio(video_id)
+        if audio_path:
+            transcription = transcribe_audio(audio_path)
+            if transcription:
+                return (transcription, "audio")
+
+    return (None, "none")
+

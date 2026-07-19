@@ -127,19 +127,37 @@ def cmd_save(args):
         thumb_path = ""
 
     # ── Step 7: Fetch transcript ───────────────────────────────────────────
-    with console.status("[cyan]Fetching transcript...[/]"):
-        transcript = fetch_transcript(video_id)
+    # Phase 1: Try YouTube captions (fast, no download)
+    with console.status("[cyan]Fetching transcript (captions)...[/]"):
+        transcript, transcript_source = fetch_transcript(video_id, use_audio_fallback=False)
 
-    if not transcript:
-        console.print("\n[bold red]X No transcript available.[/]")
-        console.print(
-            "[dim]This video may have captions disabled or be in an "
-            "unsupported language. Cannot process without a transcript.[/]"
-        )
-        sys.exit(1)
+    if transcript:
+        word_count = len(transcript.split())
+        console.print(f"[green]OK[/] Transcript fetched (captions, {word_count} words)")
+    else:
+        # Phase 2: Audio transcription fallback
+        console.print("[yellow]![/] Captions unavailable — trying audio transcription...")
+        console.print("[dim]   Downloading audio...[/]")
 
-    word_count = len(transcript.split())
-    console.print(f"[green]OK[/] Transcript fetched ({word_count} words)")
+        from src.ingestion import download_audio, transcribe_audio
+
+        audio_path = download_audio(video_id)
+        if audio_path:
+            console.print("[dim]   Audio downloaded — transcribing with Gemini...[/]")
+            with console.status("[cyan]Transcribing audio with Gemini...[/]"):
+                transcript = transcribe_audio(audio_path)
+            transcript_source = "audio" if transcript else "none"
+
+        if transcript:
+            word_count = len(transcript.split())
+            console.print(f"[green]OK[/] Transcript fetched (audio, {word_count} words)")
+        else:
+            console.print("\n[bold red]X No transcript available.[/]")
+            console.print(
+                "[dim]Captions are disabled and audio transcription failed. "
+                "Cannot process without a transcript.[/]"
+            )
+            sys.exit(1)
 
     # ── Step 8: Summarize + tag ────────────────────────────────────────────
     with console.status("[cyan]Summarizing with Gemini...[/]"):

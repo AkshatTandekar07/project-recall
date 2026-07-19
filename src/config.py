@@ -18,10 +18,12 @@ BASE_DIR = Path(__file__).parent.parent
 # All local data lives inside recall_db/
 DB_DIR = BASE_DIR / "recall_db"
 THUMBNAIL_DIR = DB_DIR / "thumbnails"
+AUDIO_DIR = DB_DIR / "audio"
 
 # Create directories if they don't exist yet
 DB_DIR.mkdir(exist_ok=True)
 THUMBNAIL_DIR.mkdir(exist_ok=True)
+AUDIO_DIR.mkdir(exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # ChromaDB
