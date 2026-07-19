@@ -15,15 +15,20 @@ load_dotenv()
 # Root of the project (one level up from this file)
 BASE_DIR = Path(__file__).parent.parent
 
-# All local data lives inside recall_db/
-DB_DIR = BASE_DIR / "recall_db"
-THUMBNAIL_DIR = DB_DIR / "thumbnails"
-AUDIO_DIR = DB_DIR / "audio"
+# DATA_DIR — set this env var to a Railway persistent volume path (e.g. /data)
+# Falls back to the local recall_db/ folder when running on your machine.
+_env_data = os.getenv("DATA_DIR")
+DATA_DIR = Path(_env_data) if _env_data else BASE_DIR / "recall_db"
+
+# All persistent data lives under DATA_DIR
+DB_DIR = DATA_DIR               # ChromaDB writes directly here
+THUMBNAIL_DIR = DATA_DIR / "thumbnails"
+AUDIO_DIR = DATA_DIR / "audio"
 
 # Create directories if they don't exist yet
-DB_DIR.mkdir(exist_ok=True)
-THUMBNAIL_DIR.mkdir(exist_ok=True)
-AUDIO_DIR.mkdir(exist_ok=True)
+DB_DIR.mkdir(parents=True, exist_ok=True)
+THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
+AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # ChromaDB
