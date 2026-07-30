@@ -132,21 +132,40 @@ def download_thumbnail(video_id: str, thumbnail_url: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Audio download (fallback for missing captions)
 # ---------------------------------------------------------------------------
+import logging as _logging
+_logger = _logging.getLogger(__name__)
+
+
 def download_audio(video_id: str) -> Optional[str]:
     """
     Download audio-only from a YouTube video using yt-dlp.
 
     Saves to recall_db/audio/{video_id}.m4a
     Returns the file path string, or None if download fails.
+
+    Note: Cloud/datacenter IPs may be blocked by YouTube.
+    We use extractor_args to bypass common restrictions.
     """
     output_path = AUDIO_DIR / f"{video_id}.%(ext)s"
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
+        # Prefer m4a, fall back to any audio
         "format": "bestaudio[ext=m4a]/bestaudio/best",
         "outtmpl": str(output_path),
-        "postprocessors": [],  # No conversion needed
+        "postprocessors": [],
+        # Bypass YouTube datacenter IP restrictions
+        "extractor_args": {
+            "youtube": {
+                "skip": ["translated_subs"],
+                "player_skip": ["webpage", "configs", "js"],
+            }
+        },
+        # Extra resilience
+        "retries": 3,
+        "fragment_retries": 3,
+        "nocheckcertificate": True,
     }
 
     try:
@@ -158,8 +177,8 @@ def download_audio(video_id: str) -> Optional[str]:
             final_path = AUDIO_DIR / f"{video_id}.{ext}"
             if final_path.exists():
                 return str(final_path)
-    except Exception:
-        pass
+    except Exception as exc:
+        _logger.warning("download_audio failed for %s: %s", video_id, exc)
 
     # Check if any file was created with the video_id prefix
     for f in AUDIO_DIR.iterdir():

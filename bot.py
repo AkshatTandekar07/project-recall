@@ -226,7 +226,13 @@ def _run_save_pipeline(video_id: str, url: str) -> dict:
         if not transcript:
             return {
                 "success": False,
-                "error": "No transcript available — captions disabled and audio transcription failed.",
+                "error": (
+                    "⚠️ No transcript available.\n\n"
+                    "This video has captions disabled and audio download failed "
+                    "(YouTube blocks audio downloads from cloud servers).\n\n"
+                    "Try a video that has captions enabled, or one where the creator "
+                    "enabled auto-generated captions."
+                ),
             }
 
         # 7. Summarize
