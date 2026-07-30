@@ -3,7 +3,10 @@ src/ingestion.py — ProjectRecall Data Ingestion Layer
 Handles all URL parsing, metadata fetching, thumbnail downloading,
 transcript extraction, and audio transcription fallback.
 """
+import logging
+import os
 import re
+import tempfile
 import time
 import requests
 from pathlib import Path
@@ -18,7 +21,35 @@ from youtube_transcript_api import (
 from google import genai
 from google.genai import errors as genai_errors
 
-from .config import THUMBNAIL_DIR, AUDIO_DIR, MAX_SHORT_DURATION, GEMINI_API_KEY, GEMINI_LLM_MODEL
+from .config import THUMBNAIL_DIR, AUDIO_DIR, MAX_SHORT_DURATION, GEMINI_API_KEY, GEMINI_LLM_MODEL, YOUTUBE_COOKIES
+
+_logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Cookie helper — writes YOUTUBE_COOKIES env var to a temp file for yt-dlp
+# and youtube-transcript-api. Returns the path, or None if no cookies set.
+# IMPORTANT: caller must delete the file after use.
+# ---------------------------------------------------------------------------
+def _get_cookie_file() -> Optional[str]:
+    """Write YOUTUBE_COOKIES content to a temp Netscape-format cookies file."""
+    if not YOUTUBE_COOKIES or not YOUTUBE_COOKIES.strip():
+        return None
+    tf = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    )
+    tf.write(YOUTUBE_COOKIES)
+    tf.close()
+    return tf.name
+
+
+def _delete_cookie_file(path: Optional[str]) -> None:
+    """Delete a temp cookie file if it exists."""
+    if path:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
 
 # ---------------------------------------------------------------------------
 # URL Patterns (ordered by specificity)
@@ -132,10 +163,6 @@ def download_thumbnail(video_id: str, thumbnail_url: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Audio download (fallback for missing captions)
 # ---------------------------------------------------------------------------
-import logging as _logging
-_logger = _logging.getLogger(__name__)
-
-
 def download_audio(video_id: str) -> Optional[str]:
     """
     Download audio-only from a YouTube video using yt-dlp.
@@ -151,22 +178,21 @@ def download_audio(video_id: str) -> Optional[str]:
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
-        # Prefer m4a, fall back to any audio
         "format": "bestaudio[ext=m4a]/bestaudio/best",
         "outtmpl": str(output_path),
         "postprocessors": [],
-        # Bypass YouTube datacenter IP restrictions
-        "extractor_args": {
-            "youtube": {
-                "skip": ["translated_subs"],
-                "player_skip": ["webpage", "configs", "js"],
-            }
-        },
         # Extra resilience
         "retries": 3,
         "fragment_retries": 3,
         "nocheckcertificate": True,
     }
+
+    cookie_file = _get_cookie_file()
+    if cookie_file:
+        ydl_opts["cookiefile"] = cookie_file
+        _logger.info("download_audio: using cookies for %s", video_id)
+    else:
+        _logger.warning("download_audio: no cookies set — Railway IP may be blocked")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -179,6 +205,8 @@ def download_audio(video_id: str) -> Optional[str]:
                 return str(final_path)
     except Exception as exc:
         _logger.warning("download_audio failed for %s: %s", video_id, exc)
+    finally:
+        _delete_cookie_file(cookie_file)
 
     # Check if any file was created with the video_id prefix
     for f in AUDIO_DIR.iterdir():
@@ -284,14 +312,22 @@ def fetch_transcript(video_id: str, use_audio_fallback: bool = True) -> Tuple[Op
       If both fail, returns (None, "none")
     """
     # Attempt 1: YouTube captions (fast path)
+    cookie_file = _get_cookie_file()
+    if cookie_file:
+        _logger.info("fetch_transcript: using cookies for %s", video_id)
+    else:
+        _logger.warning("fetch_transcript: no cookies — Railway IP may block captions for %s", video_id)
     try:
-        transcript = YouTubeTranscriptApi().fetch(video_id)
+        api = YouTubeTranscriptApi(cookies=cookie_file) if cookie_file else YouTubeTranscriptApi()
+        transcript = api.fetch(video_id)
         full_text = " ".join(snippet.text for snippet in transcript)
         text = full_text.strip()
         if text:
             return (text, "captions")
-    except Exception:
-        pass
+    except Exception as exc:
+        _logger.warning("fetch_transcript captions failed for %s: %s", video_id, exc)
+    finally:
+        _delete_cookie_file(cookie_file)
 
     # Attempt 2: Audio transcription fallback
     if use_audio_fallback:

@@ -63,3 +63,11 @@ MAX_SHORT_DURATION = 180  # seconds (3 minutes)
 # Web verification
 # ---------------------------------------------------------------------------
 MAX_WEB_RESULTS = 2  # DuckDuckGo results per claim (best-effort, non-blocking)
+
+# ---------------------------------------------------------------------------
+# YouTube cookies (Netscape format)
+# Set YOUTUBE_COOKIES env var on Railway to bypass datacenter IP blocks.
+# Export from your browser using the "cookies.txt" extension while on youtube.com
+# ---------------------------------------------------------------------------
+YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "")
+
